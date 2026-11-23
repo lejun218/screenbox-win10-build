@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 240
     env:
       GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CERT_PASSWORD: ScreenboxBuild2026
       UPSTREAM: https://github.com/huynhsontung/Screenbox.git
     steps:
@@ -25,6 +26,7 @@ jobs:
         run: |
           Set-Content -Path permcheck.txt -Value "permission check"
           gh release create permcheck --repo $env:GITHUB_REPOSITORY --title "permission check" --notes "temporary" permcheck.txt
+          if ($LASTEXITCODE -ne 0) { throw "GITHUB_TOKEN cannot create releases (write permission missing)" }
           gh release delete permcheck --repo $env:GITHUB_REPOSITORY --yes
           Write-Host "GITHUB_TOKEN write permission OK"
 
@@ -130,6 +132,14 @@ jobs:
             --title "Screenbox $env:APP_VERSION (Windows 10 x64)" `
             --notes-file NOTES.md `
             "Screenbox-win10-x64.zip"
+          if ($LASTEXITCODE -ne 0) {
+            $tag = "v$env:APP_VERSION-x64-$env:GITHUB_RUN_NUMBER"
+            gh release create $tag `
+              --repo $env:GITHUB_REPOSITORY `
+              --title "Screenbox $env:APP_VERSION (Windows 10 x64) build $env:GITHUB_RUN_NUMBER" `
+              --notes-file NOTES.md `
+              "Screenbox-win10-x64.zip"
+          }
           Write-Host "Released $tag"
 
       - name: 10. Upload workflow artifact as fallback
