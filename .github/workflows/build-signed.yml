@@ -59,21 +59,25 @@ jobs:
           ./scripts/Update-AppxManifest.ps1 -Identity Sideload
           ./scripts/Update-ProjectVersion.ps1
 
-      - name: 6. Create self-signed certificate
+      - name: 6. Create and install self-signed certificate
         shell: pwsh
         run: |
           $secure = ConvertTo-SecureString -String $env:CERT_PASSWORD -Force -AsPlainText
+          $pfxPath = Join-Path $env:GITHUB_WORKSPACE "src\Screenbox\Screenbox_TemporaryKey.pfx"
+          $cerPath = Join-Path $env:GITHUB_WORKSPACE "src\Screenbox\Screenbox_TemporaryKey.cer"
           $cert = New-SelfSignedCertificate -Type Custom `
             -Subject "CN=ABCDF790-DBE4-48F7-8204-32FCB69ADF9C" `
             -KeyUsage DigitalSignature `
+            -KeySpec Signature `
             -FriendlyName "Screenbox Self-Signed" `
             -CertStoreLocation "Cert:\CurrentUser\My" `
             -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}") `
             -KeyExportPolicy Exportable
-          Export-PfxCertificate -Cert $cert -FilePath "src\Screenbox\Screenbox_TemporaryKey.pfx" -Password $secure | Out-Null
-          Export-Certificate -Cert $cert -FilePath "src\Screenbox\Screenbox_TemporaryKey.cer" | Out-Null
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secure | Out-Null
+          Export-Certificate -Cert $cert -FilePath $cerPath | Out-Null
+          $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $secure
           "CERT_THUMB=$($cert.Thumbprint)" >> $env:GITHUB_ENV
-          Write-Host "Certificate thumbprint: $($cert.Thumbprint)"
+          Write-Host "Certificate thumbprint: $($cert.Thumbprint)" ($imported.Thumbprint)
 
       - name: 7. Build signed x64 MSIX
         shell: pwsh
@@ -90,8 +94,7 @@ jobs:
             '-p:UapAppxPackageBuildMode=SideloadOnly',
             '-p:AppxBundlePlatforms=x64',
             '-p:AppxPackageSigningEnabled=True',
-            '-p:PackageCertificateKeyFile=Screenbox_TemporaryKey.pfx',
-            "-p:PackageCertificatePassword=$env:CERT_PASSWORD"
+            "-p:PackageCertificateThumbprint=$env:CERT_THUMB"
           )
           & msbuild @msbuildArgs 2>&1 | Tee-Object -FilePath msbuild.log
           "MSBUILD_EXIT_CODE=$LASTEXITCODE" >> $env:GITHUB_ENV
@@ -103,18 +106,17 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path diag -Force | Out-Null
           if (Test-Path "src\msbuild.log") { Copy-Item "src\msbuild.log" "diag\msbuild.log" }
-          $tree = @()
+          $lines = @("MSBUILD_EXIT_CODE=$env:MSBUILD_EXIT_CODE")
           if (Test-Path "src\Screenbox\AppPackages") {
-            $tree += (Get-ChildItem "src\Screenbox\AppPackages" -Recurse | Select-Object FullName, Length | Out-String)
+            $lines += Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File | ForEach-Object { "$($_.FullName) | $($_.Length)" }
           } else {
-            $tree += "AppPackages folder does not exist"
+            $lines += "AppPackages folder does not exist"
           }
-          $tree += "MSBUILD_EXIT_CODE=$env:MSBUILD_EXIT_CODE"
-          $tree | Set-Content "diag\apppackages-tree.txt"
+          $lines | Set-Content "diag\apppackages-tree.txt"
           $tag = "build-log-$env:GITHUB_RUN_NUMBER"
           gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Build log $env:GITHUB_RUN_NUMBER" --notes "MSBuild log and AppPackages tree" "diag\msbuild.log" "diag\apppackages-tree.txt"
           if (Test-Path "src\msbuild.log") {
-            $hits = Select-String -Path "src\msbuild.log" -Pattern "error|MSB[0-9]{4}" -CaseSensitive:$false | Select-Object -First 10
+            $hits = Select-String -Path "src\msbuild.log" -Pattern "error |APPX[0-9]{4}|MSB[0-9]{4}" -CaseSensitive:$false | Select-Object -First 10
             foreach ($h in $hits) { Write-Host "::error::$($h.Line.Trim())" }
           }
 
@@ -122,46 +124,51 @@ jobs:
         if: success()
         shell: pwsh
         run: |
-          $root = "src\Screenbox"
-          $msix = Get-ChildItem $root -Recurse -Include *.msix, *.msixbundle -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $msix) { throw "No MSIX package produced by the build" }
-          Write-Host "Package: $($msix.FullName) ($($msix.Length) bytes)"
+          $root = Join-Path $env:GITHUB_WORKSPACE "src\Screenbox"
+          $bundles = @(Get-ChildItem $root -Recurse -File -Filter *.msixbundle -ErrorAction SilentlyContinue)
+          $packages = @(Get-ChildItem $root -Recurse -File -Filter *.msix -ErrorAction SilentlyContinue)
+          Write-Host "bundles=$($bundles.Count) msix=$($packages.Count)"
+          $bundles | ForEach-Object { Write-Host "BUNDLE $($_.FullName) $($_.Length)" }
+          $packages | ForEach-Object { Write-Host "MSIX $($_.FullName) $($_.Length)" }
 
-          if ($msix.Name -match '(\d+\.\d+\.\d+\.\d+)') {
+          $pick = $null
+          $x64bundle = $bundles | Where-Object { $_.Name -match '_x64' } | Sort-Object Length -Descending | Select-Object -First 1
+          if ($x64bundle) { $pick = $x64bundle }
+          if (-not $pick -and $bundles.Count -gt 0) { $pick = $bundles | Sort-Object Length -Descending | Select-Object -First 1 }
+          if (-not $pick) {
+            $x64pkg = $packages | Where-Object { $_.Name -match '_x64\.msix$' -and $_.Name -notmatch 'language' } | Sort-Object Length -Descending | Select-Object -First 1
+            if ($x64pkg) { $pick = $x64pkg }
+          }
+          if (-not $pick) { throw "No installable MSIX package produced by the build" }
+          Write-Host "Picked: $($pick.FullName) ($($pick.Length) bytes)"
+
+          if ($pick.Name -match '(\d+\.\d+\.\d+\.\d+)') {
             "APP_VERSION=$($Matches[1])" >> $env:GITHUB_ENV
           } else {
             "APP_VERSION=0.0.0.0" >> $env:GITHUB_ENV
           }
 
-          $out = "kit"
+          $out = Join-Path $env:GITHUB_WORKSPACE "kit"
           New-Item -ItemType Directory -Path $out -Force | Out-Null
-          Copy-Item -Path $msix.FullName -Destination $out
-          $depDir = Join-Path $msix.Directory.FullName "Dependencies"
+          Copy-Item -Path $pick.FullName -Destination $out
+          $depDir = Join-Path $pick.Directory.FullName "Dependencies"
           if (Test-Path $depDir) { Copy-Item -Path $depDir -Destination $out -Recurse }
-          Copy-Item -Path "src\Screenbox\Screenbox_TemporaryKey.cer" -Destination $out
-          Copy-Item -Path "INSTALL.txt" -Destination $out
+          Copy-Item -Path (Join-Path $root "Screenbox_TemporaryKey.cer") -Destination $out
+          Copy-Item -Path (Join-Path $env:GITHUB_WORKSPACE "INSTALL.txt") -Destination $out
 
-          Compress-Archive -Path "$out\*" -DestinationPath "Screenbox-win10-x64.zip" -CompressionLevel Optimal -Force
-          Get-Item "Screenbox-win10-x64.zip" | Select-Object Name, Length | Format-Table
+          Compress-Archive -Path "$out\*" -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "Screenbox-win10-x64.zip") -CompressionLevel Optimal -Force
+          Get-Item (Join-Path $env:GITHUB_WORKSPACE "Screenbox-win10-x64.zip") | Select-Object Name, Length | Format-Table
 
       - name: 9. Publish release with install kit
         if: success()
         shell: pwsh
         run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE "Screenbox-win10-x64.zip"
           $tag = "v$env:APP_VERSION-x64"
-          gh release create $tag `
-            --repo $env:GITHUB_REPOSITORY `
-            --title "Screenbox $env:APP_VERSION (Windows 10 x64)" `
-            --notes-file NOTES.md `
-            "Screenbox-win10-x64.zip"
+          gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION (Windows 10 x64)" --notes-file (Join-Path $env:GITHUB_WORKSPACE "NOTES.md") $zip
           if ($LASTEXITCODE -ne 0) {
             $tag = "v$env:APP_VERSION-x64-$env:GITHUB_RUN_NUMBER"
-            gh release create $tag `
-              --repo $env:GITHUB_REPOSITORY `
-              --title "Screenbox $env:APP_VERSION (Windows 10 x64) build $env:GITHUB_RUN_NUMBER" `
-              --notes-file NOTES.md `
-              "Screenbox-win10-x64.zip"
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION (Windows 10 x64) build $env:GITHUB_RUN_NUMBER" --notes-file (Join-Path $env:GITHUB_WORKSPACE "NOTES.md") $zip
           }
           Write-Host "Released $tag"
 
