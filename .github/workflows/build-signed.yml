@@ -110,27 +110,44 @@ jobs:
             Write-Host $m
           }
           try {
-            $bundle = Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File -Filter *.msixbundle | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            $ws = $env:GITHUB_WORKSPACE
+            $bundle = Get-ChildItem "$ws\src\Screenbox\AppPackages" -Recurse -File -Filter *.msixbundle | Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if (-not $bundle) { throw "msixbundle not found" }
             $pkg = $bundle.FullName
+
+            $cer = "$ws\src\Screenbox\Screenbox_TemporaryKey.cer"
+            if (-not (Test-Path -LiteralPath $cer)) { throw "cer not found: $cer" }
+
+            $ins = "$ws\INSTALL.txt"
+            if (-not (Test-Path -LiteralPath $ins)) {
+              $ins = "$ws\INSTALL-generated.txt"
+              @(
+                "Screenbox Windows 10 x64 安装说明",
+                "---------------------------------",
+                "1. 设置 -> 更新和安全 -> 开发者选项，开启 开发人员模式/旁加载应用。",
+                "2. 右键 Screenbox_TemporaryKey.cer -> 安装证书 -> 本地计算机 -> 受信任的根证书颁发机构。",
+                "3. 双击 .msixbundle 安装，或执行 Add-AppxPackage -Path .\*.msixbundle",
+                "",
+                "上游仓库：https://github.com/huynhsontung/Screenbox （GPL-3.0）"
+              ) | Set-Content -LiteralPath $ins -Encoding utf8
+            }
+
             $ver = $env:APP_VERSION
             if ([string]::IsNullOrEmpty($ver) -and ($bundle.Name -match '(\d+\.\d+\.\d+\.\d+)')) { $ver = $Matches[1] }
             if ([string]::IsNullOrEmpty($ver)) { $ver = "0.0.0.0" }
-            Note "pkg=$pkg bytes=$($bundle.Length) ver=$ver"
+            Note "pkg=$pkg bytes=$($bundle.Length)"
+            Note "cer exists=$(Test-Path -LiteralPath $cer)"
+            Note "ins=$ins exists=$(Test-Path -LiteralPath $ins) ver=$ver"
 
             $tag = "v$ver-x64"
-            $r = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." $pkg "src\Screenbox\Screenbox_TemporaryKey.cer" "INSTALL.txt" 2>&1 | Out-String
-            Note "A create-all exit=$LASTEXITCODE out=$r"
-
+            $r = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." $pkg $cer $ins 2>&1 | Out-String
+            Note "A create exit=$LASTEXITCODE out=$r"
             if ($LASTEXITCODE -ne 0) {
               $tag = "v$ver-x64-r$env:GITHUB_RUN_NUMBER"
-              $r = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." "src\Screenbox\Screenbox_TemporaryKey.cer" "INSTALL.txt" 2>&1 | Out-String
-              Note "B create-small exit=$LASTEXITCODE out=$r"
-              if ($LASTEXITCODE -eq 0) {
-                $u = & gh release upload $tag $pkg --repo $env:GITHUB_REPOSITORY 2>&1 | Out-String
-                Note "B upload-bundle exit=$LASTEXITCODE out=$u"
-              }
+              $r = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." $pkg $cer $ins 2>&1 | Out-String
+              Note "B create-retry exit=$LASTEXITCODE out=$r"
             }
+            if ($LASTEXITCODE -ne 0) { exit 1 }
             Note "done tag=$tag"
           } catch {
             Note "EXCEPTION($($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
