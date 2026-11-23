@@ -84,6 +84,7 @@ jobs:
             -v:minimal `
             -p:RestoreConfigFile=nuget.config `
             -p:ContinuousIntegrationBuild=true `
+            -p:GenerateAppxPackageOnBuild=true `
             -p:Configuration=Release `
             -p:Platform=x64 `
             -p:UapAppxPackageBuildMode=SideloadOnly `
@@ -95,27 +96,30 @@ jobs:
       - name: 8. Collect artifacts and zip install kit
         shell: pwsh
         run: |
-          $pkgDir = Get-ChildItem "src\Screenbox\AppPackages" -Directory -Filter "*_Test" |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $pkgDir) { throw "No AppPackages output found" }
+          $root = "src\Screenbox"
+          if (Test-Path "$root\AppPackages") {
+            Write-Host "--- AppPackages tree ---"
+            Get-ChildItem "$root\AppPackages" -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+          } else {
+            Write-Host "AppPackages folder not found, falling back to recursive search"
+          }
 
-          $name = $pkgDir.Name
-          if ($name -match 'Screenbox_(\d+\.\d+\.\d+\.\d+)') {
+          $msix = Get-ChildItem $root -Recurse -Include *.msix, *.msixbundle -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) { throw "No MSIX package produced by the build" }
+          Write-Host "Package: $($msix.FullName) ($($msix.Length) bytes)"
+
+          if ($msix.Name -match '(\d+\.\d+\.\d+\.\d+)') {
             "APP_VERSION=$($Matches[1])" >> $env:GITHUB_ENV
           } else {
             "APP_VERSION=0.0.0.0" >> $env:GITHUB_ENV
           }
 
-          Write-Host "Package folder: $name"
-          Get-ChildItem $pkgDir.FullName | Select-Object Name, Length | Format-Table
-
           $out = "kit"
           New-Item -ItemType Directory -Path $out -Force | Out-Null
-          Copy-Item -Path (Join-Path $pkgDir.FullName "*.msix") -Destination $out -ErrorAction SilentlyContinue
-          Copy-Item -Path (Join-Path $pkgDir.FullName "*.msixbundle") -Destination $out -ErrorAction SilentlyContinue
-          if (Test-Path (Join-Path $pkgDir.FullName "Dependencies")) {
-            Copy-Item -Path (Join-Path $pkgDir.FullName "Dependencies") -Destination $out -Recurse
-          }
+          Copy-Item -Path $msix.FullName -Destination $out
+          $depDir = Join-Path $msix.Directory.FullName "Dependencies"
+          if (Test-Path $depDir) { Copy-Item -Path $depDir -Destination $out -Recurse }
           Copy-Item -Path "src\Screenbox\Screenbox_TemporaryKey.cer" -Destination $out
           Copy-Item -Path "INSTALL.txt" -Destination $out
 
