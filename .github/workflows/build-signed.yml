@@ -16,6 +16,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 240
     env:
+      GH_REPO: ${{ github.repository }}
       CERT_PASSWORD: ScreenboxBuild2026
       UPSTREAM: https://github.com/huynhsontung/Screenbox.git
     steps:
@@ -23,8 +24,8 @@ jobs:
         shell: pwsh
         run: |
           Set-Content -Path permcheck.txt -Value "permission check"
-          gh release create permcheck --title "permission check" --notes "temporary" permcheck.txt
-          gh release delete permcheck --yes
+          gh release create permcheck --repo $env:GITHUB_REPOSITORY --title "permission check" --notes "temporary" permcheck.txt
+          gh release delete permcheck --repo $env:GITHUB_REPOSITORY --yes
           Write-Host "GITHUB_TOKEN write permission OK"
 
       - name: 2. Clone upstream source
@@ -125,6 +126,7 @@ jobs:
         run: |
           $tag = "v$env:APP_VERSION-x64"
           gh release create $tag `
+            --repo $env:GITHUB_REPOSITORY `
             --title "Screenbox $env:APP_VERSION (Windows 10 x64)" `
             --notes-file NOTES.md `
             "Screenbox-win10-x64.zip"
