@@ -1,7 +1,7 @@
 name: Build Screenbox for Windows 10 (x64)
 
 # 从上游开源仓库拉取源码，在 Windows runner 上用 Visual Studio / MSBuild 的
-# UWP 工具链编译，生成带自签名证书的 x64 MSIX 安装包，并发布到 Release 便于下载。
+# UWP 工具链编译，生戌带有自签名证书的 x64 MSIX 安装包，并发布到 Release 便于下载。
 
 on:
   push:
@@ -79,19 +79,34 @@ jobs:
         shell: pwsh
         working-directory: src
         run: |
-          msbuild Screenbox\Screenbox.csproj `
-            -restore `
-            -v:minimal `
-            -p:RestoreConfigFile=nuget.config `
-            -p:ContinuousIntegrationBuild=true `
-            -p:GenerateAppxPackageOnBuild=true `
-            -p:Configuration=Release `
-            -p:Platform=x64 `
-            -p:UapAppxPackageBuildMode=SideloadOnly `
-            -p:AppxBundle=Never `
-            -p:AppxPackageSigningEnabled=True `
-            -p:PackageCertificateKeyFile=Screenbox_TemporaryKey.pfx `
-            -p:PackageCertificatePassword=$env:CERT_PASSWORD
+          $msbuildArgs = @(
+            'Screenbox\Screenbox.csproj',
+            '-restore',
+            '-v:normal',
+            '-p:RestoreConfigFile=nuget.config',
+            '-p:ContinuousIntegrationBuild=true',
+            '-p:Configuration=Release',
+            '-p:Platform=x64',
+            '-p:UapAppxPackageBuildMode=SideloadOnly',
+            '-p:AppxBundlePlatforms=x64',
+            '-p:AppxPackageSigningEnabled=True',
+            '-p:PackageCertificateKeyFile=Screenbox_TemporaryKey.pfx',
+            "-p:PackageCertificatePassword=$env:CERT_PASSWORD"
+          )
+          & msbuild @msbuildArgs 2>&1 | Tee-Object -FilePath msbuild.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 7b. Report build errors as annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          $log = "src\msbuild.log"
+          if (Test-Path $log) {
+            Get-Content $log -Tail 100 | ForEach-Object { Write-Host "::error::$_" }
+          } else {
+            Write-Host "::error::msbuild.log not found"
+          }
+          exit 1
 
       - name: 8. Collect artifacts and zip install kit
         shell: pwsh
