@@ -1,0 +1,139 @@
+name: Build Screenbox for Windows 10 (x64)
+
+# 从上游开源仓库拉取源码，在 Windows runner 上用 Visual Studio / MSBuild 的
+# UWP 工具链编译，生成带自签名证书的 x64 MSIX 安装包，并发布到 Release 便于下载。
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    env:
+      CERT_PASSWORD: ScreenboxBuild2026
+      UPSTREAM: https://github.com/huynhsontung/Screenbox.git
+    steps:
+      - name: 1. Verify workflow write permission
+        shell: pwsh
+        run: |
+          Set-Content -Path permcheck.txt -Value "permission check"
+          gh release create permcheck --title "permission check" --notes "temporary" permcheck.txt
+          gh release delete permcheck --yes
+          Write-Host "GITHUB_TOKEN write permission OK"
+
+      - name: 2. Clone upstream source
+        shell: pwsh
+        run: |
+          git clone --depth 1 $env:UPSTREAM src
+          Push-Location src
+          $sha = git rev-parse HEAD
+          $cdate = git log -1 --format=%cI
+          Pop-Location
+          "UPSTREAM_SHA=$sha" >> $env:GITHUB_ENV
+          "UPSTREAM_DATE=$cdate" >> $env:GITHUB_ENV
+          Write-Host "Upstream commit: $sha ($cdate)"
+
+      - name: 3. Setup .NET 11 SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '11.x'
+
+      - name: 4. Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x64
+
+      - name: 5. Update package manifest and version
+        shell: pwsh
+        working-directory: src
+        run: |
+          ./scripts/Update-AppxManifest.ps1 -Identity Sideload
+          ./scripts/Update-ProjectVersion.ps1
+
+      - name: 6. Create self-signed certificate
+        shell: pwsh
+        run: |
+          $secure = ConvertTo-SecureString -String $env:CERT_PASSWORD -Force -AsPlainText
+          $cert = New-SelfSignedCertificate -Type Custom `
+            -Subject "CN=ABCDF790-DBE4-48F7-8204-32FCB69ADF9C" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "Screenbox Self-Signed" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}") `
+            -KeyExportPolicy Exportable
+          Export-PfxCertificate -Cert $cert -FilePath "src\Screenbox\Screenbox_TemporaryKey.pfx" -Password $secure | Out-Null
+          Export-Certificate -Cert $cert -FilePath "src\Screenbox\Screenbox_TemporaryKey.cer" | Out-Null
+          "CERT_THUMB=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+          Write-Host "Certificate thumbprint: $($cert.Thumbprint)"
+
+      - name: 7. Build signed x64 MSIX
+        shell: pwsh
+        working-directory: src
+        run: |
+          msbuild Screenbox\Screenbox.csproj `
+            -restore `
+            -v:minimal `
+            -p:RestoreConfigFile=nuget.config `
+            -p:ContinuousIntegrationBuild=true `
+            -p:Configuration=Release `
+            -p:Platform=x64 `
+            -p:UapAppxPackageBuildMode=SideloadOnly `
+            -p:AppxBundle=Never `
+            -p:AppxPackageSigningEnabled=True `
+            -p:PackageCertificateKeyFile=Screenbox_TemporaryKey.pfx `
+            -p:PackageCertificatePassword=$env:CERT_PASSWORD
+
+      - name: 8. Collect artifacts and zip install kit
+        shell: pwsh
+        run: |
+          $pkgDir = Get-ChildItem "src\Screenbox\AppPackages" -Directory -Filter "*_Test" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $pkgDir) { throw "No AppPackages output found" }
+
+          $name = $pkgDir.Name
+          if ($name -match 'Screenbox_(\d+\.\d+\.\d+\.\d+)') {
+            "APP_VERSION=$($Matches[1])" >> $env:GITHUB_ENV
+          } else {
+            "APP_VERSION=0.0.0.0" >> $env:GITHUB_ENV
+          }
+
+          Write-Host "Package folder: $name"
+          Get-ChildItem $pkgDir.FullName | Select-Object Name, Length | Format-Table
+
+          $out = "kit"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          Copy-Item -Path (Join-Path $pkgDir.FullName "*.msix") -Destination $out -ErrorAction SilentlyContinue
+          Copy-Item -Path (Join-Path $pkgDir.FullName "*.msixbundle") -Destination $out -ErrorAction SilentlyContinue
+          if (Test-Path (Join-Path $pkgDir.FullName "Dependencies")) {
+            Copy-Item -Path (Join-Path $pkgDir.FullName "Dependencies") -Destination $out -Recurse
+          }
+          Copy-Item -Path "src\Screenbox\Screenbox_TemporaryKey.cer" -Destination $out
+          Copy-Item -Path "INSTALL.txt" -Destination $out
+
+          Compress-Archive -Path "$out\*" -DestinationPath "Screenbox-win10-x64.zip" -CompressionLevel Optimal -Force
+          Get-Item "Screenbox-win10-x64.zip" | Select-Object Name, Length | Format-Table
+
+      - name: 9. Publish release with install kit
+        if: success()
+        shell: pwsh
+        run: |
+          $tag = "v$env:APP_VERSION-x64"
+          gh release create $tag `
+            --title "Screenbox $env:APP_VERSION (Windows 10 x64)" `
+            --notes-file NOTES.md `
+            "Screenbox-win10-x64.zip"
+          Write-Host "Released $tag"
+
+      - name: 10. Upload workflow artifact as fallback
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Screenbox-win10-x64
+          path: Screenbox-win10-x64.zip
+          if-no-files-found: warn
