@@ -94,35 +94,35 @@ jobs:
             "-p:PackageCertificatePassword=$env:CERT_PASSWORD"
           )
           & msbuild @msbuildArgs 2>&1 | Tee-Object -FilePath msbuild.log
+          "MSBUILD_EXIT_CODE=$LASTEXITCODE" >> $env:GITHUB_ENV
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 7b. Publish build log and report errors
-        if: failure()
+      - name: 7b. Archive build log (always)
+        if: always()
         shell: pwsh
         run: |
-          $log = "src\msbuild.log"
-          if (Test-Path $log) {
-            Copy-Item $log "msbuild.log" -Force
-            $tag = "build-log-$env:GITHUB_RUN_NUMBER"
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Build log $env:GITHUB_RUN_NUMBER" --notes "MSBuild log of the failed build" "msbuild.log"
-            $hits = Select-String -Path $log -Pattern "error|MSB[0-9]{4}" -CaseSensitive:$false | Select-Object -First 12
-            foreach ($h in $hits) { Write-Host "::error::$($h.Line.Trim())" }
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          if (Test-Path "src\msbuild.log") { Copy-Item "src\msbuild.log" "diag\msbuild.log" }
+          $tree = @()
+          if (Test-Path "src\Screenbox\AppPackages") {
+            $tree += (Get-ChildItem "src\Screenbox\AppPackages" -Recurse | Select-Object FullName, Length | Out-String)
           } else {
-            Write-Host "::error::msbuild.log not found"
+            $tree += "AppPackages folder does not exist"
           }
-          exit 1
+          $tree += "MSBUILD_EXIT_CODE=$env:MSBUILD_EXIT_CODE"
+          $tree | Set-Content "diag\apppackages-tree.txt"
+          $tag = "build-log-$env:GITHUB_RUN_NUMBER"
+          gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Build log $env:GITHUB_RUN_NUMBER" --notes "MSBuild log and AppPackages tree" "diag\msbuild.log" "diag\apppackages-tree.txt"
+          if (Test-Path "src\msbuild.log") {
+            $hits = Select-String -Path "src\msbuild.log" -Pattern "error|MSB[0-9]{4}" -CaseSensitive:$false | Select-Object -First 10
+            foreach ($h in $hits) { Write-Host "::error::$($h.Line.Trim())" }
+          }
 
       - name: 8. Collect artifacts and zip install kit
+        if: success()
         shell: pwsh
         run: |
           $root = "src\Screenbox"
-          if (Test-Path "$root\AppPackages") {
-            Write-Host "--- AppPackages tree ---"
-            Get-ChildItem "$root\AppPackages" -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
-          } else {
-            Write-Host "AppPackages folder not found, falling back to recursive search"
-          }
-
           $msix = Get-ChildItem $root -Recurse -Include *.msix, *.msixbundle -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msix) { throw "No MSIX package produced by the build" }
