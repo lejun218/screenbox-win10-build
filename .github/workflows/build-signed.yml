@@ -136,44 +136,46 @@ jobs:
         if: success()
         shell: pwsh
         run: |
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
+          function Fail([string]$msg) {
+            Write-Host "::error::$msg"
+            $msg | Set-Content "release-error.txt" -Encoding utf8
+            $errTag = "rel-error-$env:GITHUB_RUN_NUMBER"
+            gh release create $errTag --repo $env:GITHUB_REPOSITORY --title "Release error $env:GITHUB_RUN_NUMBER" --notes-file "release-error.txt"
+            exit 1
           }
-          $notes = Get-Content "NOTES.md" -Raw
-          $tag = "v$env:APP_VERSION-x64"
-          $ok = $false
-          foreach ($attemptTag in @($tag, "$tag-$env:GITHUB_RUN_NUMBER")) {
-            $payload = @{ tag_name = $attemptTag; name = "Screenbox $env:APP_VERSION (Windows 10 x64)"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json -Depth 5
-            try {
-              $resp = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
-              $tag = $attemptTag
-              $ok = $true
-              break
-            } catch {
-              $detail = $_.Exception.Message
-              if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message }
-              Write-Host "release create for $attemptTag failed: $detail"
-              Write-Host "::error:::: release create for $attemptTag failed: $detail"
-            }
-          }
-          if (-not $ok) { throw "Could not create release" }
 
+          $token = $env:GH_TOKEN
+          if (-not $token) { Fail 'GH_TOKEN is empty' }
+
+          $notes = Get-Content "NOTES.md" -Raw
+          $payload = @{ tag_name = "v$env:APP_VERSION-x64"; name = "Screenbox $env:APP_VERSION (Windows 10 x64)"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json -Depth 5
+          [IO.File]::WriteAllText("$PWD\release-payload.json", $payload, (New-Object System.Text.UTF8Encoding($false)))
+
+          $createRaw = & curl.exe -sS -X POST `
+            -H "Authorization: Bearer $token" `
+            -H "Accept: application/vnd.github+json" `
+            -H "X-GitHub-Api-Version: 2022-11-28" `
+            -H "Content-Type: application/json" `
+            --data-binary "@release-payload.json" `
+            "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases" 2>&1 | Out-String
+          $createCode = $LASTEXITCODE
+          Write-Host "create exit=$createCode response=$createRaw"
+          if ($createCode -ne 0) { Fail "release create failed: $createRaw" }
+
+          $resp = $createRaw | ConvertFrom-Json
           $upload = $resp.upload_url -replace '\{.*\}', ''
           foreach ($a in @($env:PKG_PATH, "src\Screenbox\Screenbox_TemporaryKey.cer", "INSTALL.txt")) {
             $name = Split-Path $a -Leaf
-            try {
-              Invoke-RestMethod -Uri "$upload?name=$name&label=$name" -Method Post -Headers $headers -ContentType 'application/octet-stream' -InFile $a -TimeoutSec 900 | Out-Null
-              Write-Host "uploaded $name"
-            } catch {
-              $detail = $_.Exception.Message
-              if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message }
-              Write-Host "::error:::: asset $name upload failed: $detail"
-              throw
-            }
+            $upRaw = & curl.exe -sS -X POST `
+              -H "Authorization: Bearer $token" `
+              -H "Content-Type: application/octet-stream" `
+              --data-binary "@$a" `
+              "$upload?name=$name" 2>&1 | Out-String
+            $upCode = $LASTEXITCODE
+            Write-Host "upload $name exit=$upCode"
+            if ($upCode -ne 0) { Fail "asset upload $name failed: $upRaw" }
           }
-          Write-Host "Released $tag"
+          Write-Host "Released $($resp.tag_name)"
 
       - name: 10. Upload MSIX bundle as workflow artifact
         if: always()
