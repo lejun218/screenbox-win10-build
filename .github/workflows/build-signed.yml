@@ -35,11 +35,8 @@ jobs:
           git clone --depth 1 $env:UPSTREAM src
           Push-Location src
           $sha = git rev-parse HEAD
-          $cdate = git log -1 --format=%cI
           Pop-Location
           "UPSTREAM_SHA=$sha" >> $env:GITHUB_ENV
-          "UPSTREAM_DATE=$cdate" >> $env:GITHUB_ENV
-          Write-Host "Upstream commit: $sha ($cdate)"
 
       - name: 3. Setup .NET 11 SDK
         uses: actions/setup-dotnet@v6
@@ -66,8 +63,7 @@ jobs:
           $cerPath = Join-Path $env:GITHUB_WORKSPACE "src\Screenbox\Screenbox_TemporaryKey.cer"
           $cert = New-SelfSignedCertificate -Type Custom `
             -Subject "CN=ABCDF790-DBE4-48F7-8204-32FCB69ADF9C" `
-            -KeyUsage DigitalSignature `
-            -KeySpec Signature `
+            -KeyUsage DigitalSignature -KeySpec Signature `
             -FriendlyName "Screenbox Self-Signed" `
             -CertStoreLocation "Cert:\CurrentUser\My" `
             -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}") `
@@ -83,20 +79,14 @@ jobs:
         working-directory: src
         run: |
           $msbuildArgs = @(
-            'Screenbox\Screenbox.csproj',
-            '-restore',
-            '-v:normal',
-            '-p:RestoreConfigFile=nuget.config',
-            '-p:ContinuousIntegrationBuild=true',
-            '-p:Configuration=Release',
-            '-p:Platform=x64',
-            '-p:UapAppxPackageBuildMode=SideloadOnly',
-            '-p:AppxBundlePlatforms=x64',
+            'Screenbox\Screenbox.csproj', '-restore', '-v:normal',
+            '-p:RestoreConfigFile=nuget.config', '-p:ContinuousIntegrationBuild=true',
+            '-p:Configuration=Release', '-p:Platform=x64',
+            '-p:UapAppxPackageBuildMode=SideloadOnly', '-p:AppxBundlePlatforms=x64',
             '-p:AppxPackageSigningEnabled=True',
             "-p:PackageCertificateThumbprint=$env:CERT_THUMB"
           )
           & msbuild @msbuildArgs 2>&1 | Tee-Object -FilePath msbuild.log
-          "MSBUILD_EXIT_CODE=$LASTEXITCODE" >> $env:GITHUB_ENV
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 7b. Archive build log (always)
@@ -105,78 +95,45 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path diag -Force | Out-Null
           if (Test-Path "src\msbuild.log") { Copy-Item "src\msbuild.log" "diag\msbuild.log" }
-          $lines = @("MSBUILD_EXIT_CODE=$env:MSBUILD_EXIT_CODE")
-          if (Test-Path "src\Screenbox\AppPackages") {
-            $lines += Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File | ForEach-Object { "$($_.FullName) | $($_.Length)" }
-          } else {
-            $lines += "AppPackages folder does not exist"
-          }
+          $lines = @()
+          $lines += Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName) | $($_.Length)" }
           $lines | Set-Content "diag\apppackages-tree.txt"
-          $tag = "build-log-$env:GITHUB_RUN_NUMBER"
-          gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Build log $env:GITHUB_RUN_NUMBER" --notes "MSBuild log and AppPackages tree" "diag\msbuild.log" "diag\apppackages-tree.txt"
-
-      - name: 8. Locate built package
-        if: success()
-        shell: pwsh
-        run: |
-          $bundle = Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File -Filter *_x64.msixbundle | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $bundle) {
-            $bundle = Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File -Filter *.msixbundle | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          }
-          if (-not $bundle) { throw "No MSIX bundle found in AppPackages" }
-          Write-Host "Bundle: $($bundle.FullName) ($($bundle.Length) bytes)"
-          "PKG_PATH=$($bundle.FullName)" >> $env:GITHUB_ENV
-          if ($bundle.Name -match '(\d+\.\d+\.\d+\.\d+)') {
-            "APP_VERSION=$($Matches[1])" >> $env:GITHUB_ENV
-          } else {
-            "APP_VERSION=0.0.0.0" >> $env:GITHUB_ENV
-          }
+          gh release create "build-log-$env:GITHUB_RUN_NUMBER" --repo $env:GITHUB_REPOSITORY --title "Build log $env:GITHUB_RUN_NUMBER" --notes "MSBuild log and AppPackages tree" "diag\msbuild.log" "diag\apppackages-tree.txt"
 
       - name: 9. Publish release
         if: success()
         shell: pwsh
         run: |
-          $log = "step9.log"
-          "step9 start $(Get-Date -Format o)" | Set-Content $log
-          function R([string]$m) { Add-Content -Path $log -Value $m; Write-Host $m }
+          "step9 start" | Set-Content "step9.log"
+          function Note([string]$m) {
+            [IO.File]::AppendAllText("step9.log", "$m`r`n")
+            Write-Host $m
+          }
           try {
             $bundle = Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File -Filter *.msixbundle | Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if (-not $bundle) { throw "msixbundle not found" }
             $pkg = $bundle.FullName
-            $cer = Join-Path $env:GITHUB_WORKSPACE "src\Screenbox\Screenbox_TemporaryKey.cer"
-            $ins = Join-Path $env:GITHUB_WORKSPACE "INSTALL.txt"
-            R "pkg=$pkg size=$($bundle.Length)"
-            R "cer exists=$(Test-Path -LiteralPath $cer) install exists=$(Test-Path -LiteralPath $ins)"
-
             $ver = $env:APP_VERSION
-            if ([string]::IsNullOrEmpty($ver)) { if ($bundle.Name -match '(\d+\.\d+\.\d+\.\d+)') { $ver = $Matches[1] } else { $ver = "0.0.0.0" } }
+            if ([string]::IsNullOrEmpty($ver) -and ($bundle.Name -match '(\d+\.\d+\.\d+\.\d+)')) { $ver = $Matches[1] }
+            if ([string]::IsNullOrEmpty($ver)) { $ver = "0.0.0.0" }
+            Note "pkg=$pkg bytes=$($bundle.Length) ver=$ver"
+
             $tag = "v$ver-x64"
-
-            $out = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." $pkg $cer $ins 2>&1 | Out-String
-            R "attempt1 tag=$tag exit=$LASTEXITCODE output=$out"
-
-            if ($LASTEXITCODE -ne 0) {
-              $tag = "v$ver-x64-$env:GITHUB_RUN_NUMBER"
-              $out = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64 build $env:GITHUB_RUN_NUMBER" --notes "Built from huynhsontung/Screenbox on GitHub Actions." $pkg $cer $ins 2>&1 | Out-String
-              R "attempt2 tag=$tag exit=$LASTEXITCODE output=$out"
-            }
+            $r = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." $pkg "src\Screenbox\Screenbox_TemporaryKey.cer" "INSTALL.txt" 2>&1 | Out-String
+            Note "A create-all exit=$LASTEXITCODE out=$r"
 
             if ($LASTEXITCODE -ne 0) {
-              $emptyTag = "v$ver-x64-r$env:GITHUB_RUN_NUMBER"
-              $out = & gh release create $emptyTag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." 2>&1 | Out-String
-              R "attempt3 create-empty tag=$emptyTag exit=$LASTEXITCODE output=$out"
+              $tag = "v$ver-x64-r$env:GITHUB_RUN_NUMBER"
+              $r = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." "src\Screenbox\Screenbox_TemporaryKey.cer" "INSTALL.txt" 2>&1 | Out-String
+              Note "B create-small exit=$LASTEXITCODE out=$r"
               if ($LASTEXITCODE -eq 0) {
-                $tag = $emptyTag
-                foreach ($a in @($pkg, $cer, $ins)) {
-                  $o = & gh release upload $tag $a --repo $env:GITHUB_REPOSITORY --clobber 2>&1 | Out-String
-                  R "upload $(Split-Path $a -Leaf) exit=$LASTEXITCODE output=$o"
-                }
+                $u = & gh release upload $tag $pkg --repo $env:GITHUB_REPOSITORY 2>&1 | Out-String
+                Note "B upload-bundle exit=$LASTEXITCODE out=$u"
               }
             }
-            R "final tag=$tag"
-            if ($LASTEXITCODE -ne 0) { exit 1 }
+            Note "done tag=$tag"
           } catch {
-            R "EXCEPTION: $($_.Exception.Message)"
+            Note "EXCEPTION($($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
             exit 1
           }
 
@@ -185,8 +142,7 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path "step9.log") {
-            $tag = "rel-log-$env:GITHUB_RUN_NUMBER"
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Release step log $env:GITHUB_RUN_NUMBER" --notes "gh release output for the publish step" "step9.log"
+            gh release create "rel-log-$env:GITHUB_RUN_NUMBER" --repo $env:GITHUB_REPOSITORY --title "Release step log $env:GITHUB_RUN_NUMBER" --notes "gh release output for the publish step" "step9.log"
           }
 
       - name: 10. Upload MSIX bundle as workflow artifact
