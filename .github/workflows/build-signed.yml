@@ -1,7 +1,6 @@
 name: Build Screenbox for Windows 10 (x64)
 
-# 从上游开源仓库拉取源码，在 Windows runner 上用 Visual Studio / MSBuild 的
-# UWP 工具链编译，生成带有自签名证书的 x64 MSIX 安装包，并发布到 Release 便于下载。
+# 上游源码在 Windows runner 上用 MSBuild / UWP 工具链编译，输出已签名 x64 MSIX，直接作为 Release 资产发布。
 
 on:
   push:
@@ -75,9 +74,9 @@ jobs:
             -KeyExportPolicy Exportable
           Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secure | Out-Null
           Export-Certificate -Cert $cert -FilePath $cerPath | Out-Null
-          $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $secure
+          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $secure | Out-Null
           "CERT_THUMB=$($cert.Thumbprint)" >> $env:GITHUB_ENV
-          Write-Host "Certificate thumbprint: $($cert.Thumbprint)" ($imported.Thumbprint)
+          Write-Host "Certificate thumbprint: $($cert.Thumbprint)"
 
       - name: 7. Build signed x64 MSIX
         shell: pwsh
@@ -115,67 +114,42 @@ jobs:
           $lines | Set-Content "diag\apppackages-tree.txt"
           $tag = "build-log-$env:GITHUB_RUN_NUMBER"
           gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Build log $env:GITHUB_RUN_NUMBER" --notes "MSBuild log and AppPackages tree" "diag\msbuild.log" "diag\apppackages-tree.txt"
-          if (Test-Path "src\msbuild.log") {
-            $hits = Select-String -Path "src\msbuild.log" -Pattern "error |APPX[0-9]{4}|MSB[0-9]{4}" -CaseSensitive:$false | Select-Object -First 10
-            foreach ($h in $hits) { Write-Host "::error::$($h.Line.Trim())" }
-          }
 
-      - name: 8. Collect artifacts and zip install kit
+      - name: 8. Locate built package
         if: success()
         shell: pwsh
         run: |
-          $root = Join-Path $env:GITHUB_WORKSPACE "src\Screenbox"
-          $bundles = @(Get-ChildItem $root -Recurse -File -Filter *.msixbundle -ErrorAction SilentlyContinue)
-          $packages = @(Get-ChildItem $root -Recurse -File -Filter *.msix -ErrorAction SilentlyContinue)
-          Write-Host "bundles=$($bundles.Count) msix=$($packages.Count)"
-          $bundles | ForEach-Object { Write-Host "BUNDLE $($_.FullName) $($_.Length)" }
-          $packages | ForEach-Object { Write-Host "MSIX $($_.FullName) $($_.Length)" }
-
-          $pick = $null
-          $x64bundle = $bundles | Where-Object { $_.Name -match '_x64' } | Sort-Object Length -Descending | Select-Object -First 1
-          if ($x64bundle) { $pick = $x64bundle }
-          if (-not $pick -and $bundles.Count -gt 0) { $pick = $bundles | Sort-Object Length -Descending | Select-Object -First 1 }
-          if (-not $pick) {
-            $x64pkg = $packages | Where-Object { $_.Name -match '_x64\.msix$' -and $_.Name -notmatch 'language' } | Sort-Object Length -Descending | Select-Object -First 1
-            if ($x64pkg) { $pick = $x64pkg }
+          $bundle = Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File -Filter *_x64.msixbundle | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $bundle) {
+            $bundle = Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File -Filter *.msixbundle | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           }
-          if (-not $pick) { throw "No installable MSIX package produced by the build" }
-          Write-Host "Picked: $($pick.FullName) ($($pick.Length) bytes)"
-
-          if ($pick.Name -match '(\d+\.\d+\.\d+\.\d+)') {
+          if (-not $bundle) { throw "No MSIX bundle found in AppPackages" }
+          Write-Host "Bundle: $($bundle.FullName) ($($bundle.Length) bytes)"
+          "PKG_PATH=$($bundle.FullName)" >> $env:GITHUB_ENV
+          if ($bundle.Name -match '(\d+\.\d+\.\d+\.\d+)') {
             "APP_VERSION=$($Matches[1])" >> $env:GITHUB_ENV
           } else {
             "APP_VERSION=0.0.0.0" >> $env:GITHUB_ENV
           }
 
-          $out = Join-Path $env:GITHUB_WORKSPACE "kit"
-          New-Item -ItemType Directory -Path $out -Force | Out-Null
-          Copy-Item -Path $pick.FullName -Destination $out
-          $depDir = Join-Path $pick.Directory.FullName "Dependencies"
-          if (Test-Path $depDir) { Copy-Item -Path $depDir -Destination $out -Recurse }
-          Copy-Item -Path (Join-Path $root "Screenbox_TemporaryKey.cer") -Destination $out
-          Copy-Item -Path (Join-Path $env:GITHUB_WORKSPACE "INSTALL.txt") -Destination $out
-
-          Compress-Archive -Path "$out\*" -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "Screenbox-win10-x64.zip") -CompressionLevel Optimal -Force
-          Get-Item (Join-Path $env:GITHUB_WORKSPACE "Screenbox-win10-x64.zip") | Select-Object Name, Length | Format-Table
-
-      - name: 9. Publish release with install kit
+      - name: 9. Publish release with MSIX bundle
         if: success()
         shell: pwsh
         run: |
-          $zip = Join-Path $env:GITHUB_WORKSPACE "Screenbox-win10-x64.zip"
           $tag = "v$env:APP_VERSION-x64"
-          gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION (Windows 10 x64)" --notes-file (Join-Path $env:GITHUB_WORKSPACE "NOTES.md") $zip
+          gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION (Windows 10 x64)" --notes-file (Join-Path $env:GITHUB_WORKSPACE "NOTES.md") $env:PKG_PATH "src\Screenbox\Screenbox_TemporaryKey.cer" "INSTALL.txt"
           if ($LASTEXITCODE -ne 0) {
             $tag = "v$env:APP_VERSION-x64-$env:GITHUB_RUN_NUMBER"
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION (Windows 10 x64) build $env:GITHUB_RUN_NUMBER" --notes-file (Join-Path $env:GITHUB_WORKSPACE "NOTES.md") $zip
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION (Windows 10 x64) build $env:GITHUB_RUN_NUMBER" --notes-file (Join-Path $env:GITHUB_WORKSPACE "NOTES.md") $env:PKG_PATH "src\Screenbox\Screenbox_TemporaryKey.cer" "INSTALL.txt"
           }
           Write-Host "Released $tag"
 
-      - name: 10. Upload workflow artifact as fallback
+      - name: 10. Upload MSIX bundle as workflow artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: Screenbox-win10-x64
-          path: Screenbox-win10-x64.zip
+          name: Screenbox-win10-x64-msix
+          path: |
+            src/Screenbox/AppPackages/**/*.msixbundle
+            src/Screenbox/Screenbox_TemporaryKey.cer
           if-no-files-found: warn

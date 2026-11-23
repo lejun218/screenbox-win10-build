@@ -2,7 +2,7 @@ Screenbox Windows 10 (x64) 安装说明
 =====================================
 
 适用系统：Windows 10 1903（内部版本 10.0.18362）及以上，64 位
-包类型：UWP / MSIX（自签名，非微软商店版本）
+包类型：UWP / MSIX Bundle（自签名，非微软商店版本）
 
 一、准备工作
 ------------
@@ -14,14 +14,14 @@ Screenbox Windows 10 (x64) 安装说明
 二、安装应用
 ------------
 方式 A（图形界面）：
-  双击 Screenbox 开头的 .msix 文件，在弹出窗口中点击"安装"。
+  双击 Screenbox_x.x.x.x_x64.msixbundle，在弹出窗口中点击"安装"。
 
 方式 B（命令行，推荐，可看到详细报错）：
-  在压缩包解压后的文件夹中，按住 Shift 右键空白处 → "在此处打开 PowerShell 窗口"，执行：
-      Add-AppxPackage -Path .\Screenbox_x.x.x.x_x64.msix
+  在解压后的文件夹中，按住 Shift 右键空白处 → "在此处打开 PowerShell 窗口"，执行：
+      Add-AppxPackage -Path .\Screenbox_x.x.x.x_x64.msixbundle
 
-  如果提示缺少运行时依赖，先按顺序安装 Dependencies\x64 文件夹里的
-  appx 包，再安装主包。
+  如果提示缺少运行时依赖，先安装 Dependencies\x64 文件夹里的
+  appx 包（如有），再安装主包。
 
 三、启动
 --------
@@ -30,14 +30,14 @@ Screenbox Windows 10 (x64) 安装说明
 四、常见问题
 ------------
 - 提示"无法安装，因为未受信任"：证书没有装进"受信任的根证书颁发机构"，
-  或安装到了"当前用户"而不是"本地计算机"，重做第一步。
-- 提示"包依赖项缺失"：按提示先装 Dependencies 里的依赖包。
+  或装到了"当前用户"而不是"本地计算机"，重做第一步。
+- 提示"包依赖项缺失"：先装 Dependencies\x64 里的依赖包。
 - 提示已存在更高版本：先卸载旧版本再安装。
 - 该包使用构建时生成的临时自签名证书，与微软商店版本签名不同，
-  两者不能共存，需要先卸载商店版本。
+  两者不能共存，需先卸载商店版。
 
 五、源码信息
 ------------
 上游项目：https://github.com/huynhsontung/Screenbox
 许可证：GPL-3.0（详见上游仓库 LICENSE）
-本包由该项目源码在 Windows CI 环境编译生成，仅作个人使用。
+本包由该项目源码在 Windows CI 环境（GitHub Actions windows-latest）编译生成。
