@@ -139,34 +139,46 @@ jobs:
           $log = "step9.log"
           "step9 start $(Get-Date -Format o)" | Set-Content $log
           function R([string]$m) { Add-Content -Path $log -Value $m; Write-Host $m }
+          try {
+            $bundle = Get-ChildItem "src\Screenbox\AppPackages" -Recurse -File -Filter *.msixbundle | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $bundle) { throw "msixbundle not found" }
+            $pkg = $bundle.FullName
+            $cer = Join-Path $env:GITHUB_WORKSPACE "src\Screenbox\Screenbox_TemporaryKey.cer"
+            $ins = Join-Path $env:GITHUB_WORKSPACE "INSTALL.txt"
+            R "pkg=$pkg size=$($bundle.Length)"
+            R "cer exists=$(Test-Path -LiteralPath $cer) install exists=$(Test-Path -LiteralPath $ins)"
 
-          $assets = @($env:PKG_PATH, "src\Screenbox\Screenbox_TemporaryKey.cer", "INSTALL.txt")
-          $assets | ForEach-Object { R "asset: $_ exists=$(Test-Path $_) size=$((Get-Item $_ -ErrorAction SilentlyContinue).Length)" }
+            $ver = $env:APP_VERSION
+            if ([string]::IsNullOrEmpty($ver)) { if ($bundle.Name -match '(\d+\.\d+\.\d+\.\d+)') { $ver = $Matches[1] } else { $ver = "0.0.0.0" } }
+            $tag = "v$ver-x64"
 
-          $tag = "v$env:APP_VERSION-x64"
-          $out = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION Windows 10 x64" --notes "Built from huynhsontung/Screenbox source on GitHub Actions." @assets 2>&1 | Out-String
-          R "attempt1 exit=$LASTEXITCODE output=$out"
+            $out = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." $pkg $cer $ins 2>&1 | Out-String
+            R "attempt1 tag=$tag exit=$LASTEXITCODE output=$out"
 
-          if ($LASTEXITCODE -ne 0) {
-            $tag = "v$env:APP_VERSION-x64-$env:GITHUB_RUN_NUMBER"
-            $out = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION Windows 10 x64 build $env:GITHUB_RUN_NUMBER" --notes "Built from huynhsontung/Screenbox source on GitHub Actions." @assets 2>&1 | Out-String
-            R "attempt2 exit=$LASTEXITCODE output=$out"
-          }
+            if ($LASTEXITCODE -ne 0) {
+              $tag = "v$ver-x64-$env:GITHUB_RUN_NUMBER"
+              $out = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64 build $env:GITHUB_RUN_NUMBER" --notes "Built from huynhsontung/Screenbox on GitHub Actions." $pkg $cer $ins 2>&1 | Out-String
+              R "attempt2 tag=$tag exit=$LASTEXITCODE output=$out"
+            }
 
-          if ($LASTEXITCODE -ne 0) {
-            $tag = "v$env:APP_VERSION-x64-r$env:GITHUB_RUN_NUMBER"
-            $out = & gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION Windows 10 x64" --notes "Built from huynhsontung/Screenbox source on GitHub Actions." 2>&1 | Out-String
-            R "attempt3-create-empty exit=$LASTEXITCODE output=$out"
-            if ($LASTEXITCODE -eq 0) {
-              foreach ($a in $assets) {
-                $o = & gh release upload $tag $a --repo $env:GITHUB_REPOSITORY --clobber 2>&1 | Out-String
-                R "upload $(Split-Path $a -Leaf) exit=$LASTEXITCODE output=$o"
+            if ($LASTEXITCODE -ne 0) {
+              $emptyTag = "v$ver-x64-r$env:GITHUB_RUN_NUMBER"
+              $out = & gh release create $emptyTag --repo $env:GITHUB_REPOSITORY --title "Screenbox $ver Windows 10 x64" --notes "Built from huynhsontung/Screenbox on GitHub Actions." 2>&1 | Out-String
+              R "attempt3 create-empty tag=$emptyTag exit=$LASTEXITCODE output=$out"
+              if ($LASTEXITCODE -eq 0) {
+                $tag = $emptyTag
+                foreach ($a in @($pkg, $cer, $ins)) {
+                  $o = & gh release upload $tag $a --repo $env:GITHUB_REPOSITORY --clobber 2>&1 | Out-String
+                  R "upload $(Split-Path $a -Leaf) exit=$LASTEXITCODE output=$o"
+                }
               }
             }
+            R "final tag=$tag"
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          } catch {
+            R "EXCEPTION: $($_.Exception.Message)"
+            exit 1
           }
-
-          R "final tag=$tag"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: 9b. Archive release step log (always)
         if: always()
