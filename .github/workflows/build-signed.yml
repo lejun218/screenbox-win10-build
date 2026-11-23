@@ -136,11 +136,42 @@ jobs:
         if: success()
         shell: pwsh
         run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $notes = Get-Content "NOTES.md" -Raw
           $tag = "v$env:APP_VERSION-x64"
-          gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION (Windows 10 x64)" --notes-file (Join-Path $env:GITHUB_WORKSPACE "NOTES.md") $env:PKG_PATH "src\Screenbox\Screenbox_TemporaryKey.cer" "INSTALL.txt"
-          if ($LASTEXITCODE -ne 0) {
-            $tag = "v$env:APP_VERSION-x64-$env:GITHUB_RUN_NUMBER"
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Screenbox $env:APP_VERSION (Windows 10 x64) build $env:GITHUB_RUN_NUMBER" --notes-file (Join-Path $env:GITHUB_WORKSPACE "NOTES.md") $env:PKG_PATH "src\Screenbox\Screenbox_TemporaryKey.cer" "INSTALL.txt"
+          $ok = $false
+          foreach ($attemptTag in @($tag, "$tag-$env:GITHUB_RUN_NUMBER")) {
+            $payload = @{ tag_name = $attemptTag; name = "Screenbox $env:APP_VERSION (Windows 10 x64)"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json -Depth 5
+            try {
+              $resp = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
+              $tag = $attemptTag
+              $ok = $true
+              break
+            } catch {
+              $detail = $_.Exception.Message
+              if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message }
+              Write-Host "release create for $attemptTag failed: $detail"
+              Write-Host "::error:::: release create for $attemptTag failed: $detail"
+            }
+          }
+          if (-not $ok) { throw "Could not create release" }
+
+          $upload = $resp.upload_url -replace '\{.*\}', ''
+          foreach ($a in @($env:PKG_PATH, "src\Screenbox\Screenbox_TemporaryKey.cer", "INSTALL.txt")) {
+            $name = Split-Path $a -Leaf
+            try {
+              Invoke-RestMethod -Uri "$upload?name=$name&label=$name" -Method Post -Headers $headers -ContentType 'application/octet-stream' -InFile $a -TimeoutSec 900 | Out-Null
+              Write-Host "uploaded $name"
+            } catch {
+              $detail = $_.Exception.Message
+              if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message }
+              Write-Host "::error:::: asset $name upload failed: $detail"
+              throw
+            }
           }
           Write-Host "Released $tag"
 
